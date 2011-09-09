@@ -1,0 +1,446 @@
+#!/usr/bin/env python
+import getopt, sys, os, sqlite3, re, shutil
+from datetime import datetime, timedelta
+from subprocess import Popen, PIPE, STDOUT
+
+# TODO's:
+# DONE - Delete drives from DB
+# VOID - export logs
+#      - Check for failures? (nagios-style)
+#      - Possible smart integration? Drive will be off 90% of the time so can't be cron'ed
+#      - Detect if newest backup will fit (using my python rsnapshot-diff)
+#      - Delete old backups
+# DONE - Auto-install/update
+# VOID - Updater (for this script, as well as FAT partiiton contents)
+#      - Detect if close to a tune2fs, and autoperform after successful backup
+#      - Read(/autocreate?) config file in /etc/
+#      - Parse RSnapshot's config file to find locations and freshest copies
+#      - Format the devices for you
+#      - Re-enable + improve "wait for fsck" blurb
+# DONE - Nagios monitoring capability
+#      - ???
+
+rsnapshot_dir = '/srv/rsnapshot'
+b2u_dir = '/var/lib/backup2usb'
+ext_src = os.path.join(rsnapshot_dir, 'daily.0')
+fat_src = os.path.join(b2u_dir, 'fat32')
+sqlite_file = os.path.join(b2u_dir, 'backup2usb.sqlite')
+fat_mount = os.path.join(b2u_dir, 'fatmount')
+ext_mount = os.path.join(b2u_dir, 'extmount')
+
+if not os.path.isdir(b2u_dir):
+	os.mkdir(b2u_dir)
+if not os.path.isdir(fat_mount):
+	os.mkdir(fat_mount)
+if not os.path.isdir(ext_mount):
+	os.mkdir(ext_mount)
+
+verbose = False
+logfiles = [sys.stdout, open('/var/log/backup2usb.log', 'a')]
+
+# Log 'line' to chosen destinations
+def log(line):
+	assert len(logfiles) > 0
+	for lf in logfiles:
+		print >> lf, datetime.today().strftime('%Y-%m-%d %H:%M:%S'), line
+
+# Log then quit
+def die(line, exitcode):
+	log(line)
+	sys.exit(exitcode)
+
+# Parse the output of the 'blkid' command (which *sometimes* requires root)
+# Returns a dict of partitions, each with a dict of the params provided
+# Crashes if nothing returned via blkid, but this doesn't guarantee list is
+# fresh, unless run as root
+def diskinfo():
+	retval = {}
+	blkid = Popen(['/sbin/blkid'], stdout=PIPE)
+	for line in blkid.stdout:
+		linedata = {}
+		partition, data = line.split(': ', 1)
+		for token in [t for t in data.split(' ') if '=' in t]:
+			name, quotedval = token.split('=', 1)
+			# TODO: Fix ugly hack to pull out quotes on data someday
+			assert quotedval[0] == '"' and quotedval[-1] == '"'
+			linedata[name.lower()] = quotedval[1:-1]
+		retval[partition] = linedata
+	blkid.wait()
+	if len(retval) == 0:
+		die('Error: No block devices detected, are you running as root?', 1)
+	if verbose: log('Got list of block devices')
+	return retval
+
+# Returns the folder a device is mounted on, or None if it's not mounted
+# TODO: mount if not mounted
+def getmountpoint(partition):
+	retval = None
+	reg = re.compile('^(.+) on (.+) type .+ \(.+\)$')
+	mount = Popen(['/bin/mount'], stdout=PIPE)
+	for line in mount.stdout:
+		reg_match = reg.split(line)
+		# If this ever fails, then I need to fix the regular expression above
+		assert len(reg_match) == 4
+		if reg_match[1] == partition:
+			retval = reg_match[2]
+	mount.wait()
+	if verbose: log('Mount point of %s is %s' % (partition, retval))
+	return retval
+
+# Returns true if all is fine, crashes on errors
+def check_pid():
+	pid_file = '/var/run/backup2usb.pid'
+	if os.path.exists(pid_file):
+		if not os.access(pid_file, os.W_OK):
+			log('Error: Insufficient access to PID file: %s' % pid_file, 1)
+			return False
+		pidf = open(pid_file, 'r')
+		prev_pid = pidf.read()
+		pidf.close()
+		if os.path.exists('/proc/'+ str(prev_pid)):
+			log('ERROR: Previous backup still running (pid: %s)' % prev_pid, 1)
+			return False
+	else:
+		log('PID file doesn\'t exist, creating...')
+	pidf = open(pid_file, 'w')
+	pidf.write(str(os.getpid()))
+	pidf.close()
+	if verbose: log('This is the only instance')
+	return True
+
+# Adds the provided device to the database as a valid backup
+# TODO: Make sure this is properly error-proofed
+def add_device(dev_and_name):
+	if not ':' in dev_and_name:
+			die('Invalid device specification! (%s)' % dev_and_name, 1)
+	device, name = dev_and_name.split(':', 1)
+	matches = {}
+	fatuuid = fatlabel = extuuid = extlabel = ''
+	for partition, stats in diskinfo().iteritems():
+		if device in partition:
+			matches[partition] = stats
+	for dev in matches:
+		if matches[dev]['type'] == 'vfat':
+			fatuuid = matches[dev]['uuid']
+			fatlabel = matches[dev].has_key('label') and matches[dev]['label'] or ''
+		else:
+			extuuid = matches[dev]['uuid']
+			extlabel = matches[dev].has_key('label') and matches[dev]['label'] or ''
+	sql.execute('INSERT INTO drives(name, fatuuid, fatlabel, extuuid, extlabel) VALUES (?, ?, ?, ?, ?)', (name, fatuuid, fatlabel, extuuid, extlabel))
+	sql.commit()
+
+# Remove the provided device from the backup
+# TODO: Error-proofing, etc.
+def remove_device(name):
+	cur = sql.cursor()
+	cur.execute('DELETE FROM drives WHERE name=?;', (name,))
+	if cur.rowcount != 1:
+		print 'Drive name, %s, not found!' % name
+		sys.exit(1)
+	sql.commit()
+
+def list_devices():
+	print 'BackupID             Type   Label      UUID'
+	print '-------------------- ------ ---------- ------------------------------------'
+	for row in sql.execute('SELECT * FROM drives'):
+		print '%-20s FAT32  %-10s %s' % (row['name'], row['fatlabel'], row['fatuuid'])
+		print '                     EXT3   %-10s %s' % (row['extlabel'], row['extuuid'])
+
+def nagios_status():
+	pid_file = '/var/run/backup2usb.pid'
+	running = False
+	lastrun = sql.execute('SELECT * FROM log ORDER BY start DESC LIMIT 1;').fetchone()
+	retval = 3
+	retstr = 'UNKNOWN: %s drive reported %s (started on %s)' % (lastrun['drive'], lastrun['status'], lastrun['start'])
+	
+	if os.path.exists(pid_file):
+		if not os.access(pid_file, os.W_OK):
+			# Insufficient access to PID file, consider running
+			running = True
+		pidf = open(pid_file, 'r')
+		prev_pid = pidf.read()
+		pidf.close()
+		if os.path.exists('/proc/'+ str(prev_pid)):
+			running = True
+	
+	if lastrun['status'] == 'Complete':
+		if datetime.now() < lastrun['start'] + timedelta(hours=24):
+			retval = 0
+			retstr = 'OK: Backup on drive %s completed on %s' % (lastrun['drive'], lastrun['finish'])
+		elif datetime.now() < lastrun['start'] + timedelta(hours=36):
+			retval = 1
+			retstr = 'WARNING: Backups are stale! Last backup was on drive %s on %s' % (lastrun['drive'], lastrun['finish'])
+		else:
+			retval = 2
+			retstr = 'CRITICAL: Backup > 36 hours old! Last backup was on drive %s on %s' % (lastrun['drive'], lastrun['finish'])
+	elif lastrun['status'] == 'Transferring':
+		if running:
+			if datetime.now() < lastrun['start'] + timedelta(hours=12):
+				retval = 0
+				retstr = 'OK: Backup in progress on drive %s' % lastrun['drive']
+			else:
+				retval = 2
+				retstr = 'CRITICAL: Backup > 12 hours active! Drive %s started on %s' % (lastrun['drive'], lastrun['start'])
+		else:
+			retval = 2
+			retstr = 'CRITICAL: Backup crashed during transfer! Drive %s started on %s' % (lastrun['drive'], lastrun['start'])
+	elif lastrun['status'] == 'Initializing':
+		if running:
+			if datetime.now() < lastrun['start'] + timedelta(hours=1):
+				retval = 0
+				retstr = 'OK: Backup in progress on drive %s' % lastrun['drive']
+			else:
+				retval = 2
+				retstr = 'CRITICAL: Backup is frozen (or checkdisking?)! Backup on drive %s started on %s' % (lastrun['drive'], lastrun['start'])
+		else:
+			retval = 2
+			retstr = 'CRITICAL: Backup crashed during transfer! Drive %s started on %s' % (lastrun['drive'], lastrun['start'])
+
+	print >> sys.stdout, retstr
+	exit(retval)
+
+def perform_backup():
+	global fat_src, ext_src, verbose
+
+	# Update database log
+	cur = sql.cursor()
+	cur.execute('INSERT INTO log(start, status) VALUES (?, \'Initializing\')', (datetime.now(), ))
+	sql.commit()
+	sql_rowid = cur.lastrowid
+
+	log('')
+	log('Running backup script...')
+	if not check_pid():
+		die('already running!', 1)
+
+	# Find attached backup partitions
+	fat = {'uuid': None, 'part': None, 'dir': None}
+	ext = {'uuid': None, 'part': None, 'dir': None}
+	fatuuid_list = [x[0] for x in sql.execute('SELECT fatuuid FROM drives').fetchall()]
+	extuuid_list = [x[0] for x in sql.execute('SELECT extuuid FROM drives').fetchall()]
+	# TODO: This will cause problems if:
+	#	- there are multiple configured devices attached - Fixed! (well at least caught)
+	#	- either of the partitions have been reformatted since configuration - Fixed!
+	#	- ???
+
+	for partition, stats in diskinfo().iteritems():
+		if stats.has_key('uuid'):
+			if stats['uuid'] in fatuuid_list:
+				assert fat['part'] == None
+				fat['part'] = partition
+				fat['uuid'] = stats['uuid']
+			elif stats['uuid'] in extuuid_list:
+				assert ext['part'] == None
+				ext['part'] = partition
+				ext['uuid'] = stats['uuid']
+	if not fat['part'] or not ext['part']:
+		die('Couldn\'t find partitions! (Detected FAT32=%s, EXT3=%s)' % (fat['part'], ext['part']), 1)
+	if verbose: log('Found partitions: FAT32=%s, EXT3=%s' % (fat['part'], ext['part']))
+
+	# Find mountpoints of partitions
+	fat['dir'] = getmountpoint(fat['part'])
+	ext['dir'] = getmountpoint(ext['part'])
+	if not fat['dir']:
+		mountfat = Popen(["mount", fat['part'], fat_mount])
+		mountfat.wait()
+		fat['dir'] = getmountpoint(fat['part'])
+	if not ext['dir']:
+		mountext = Popen(["mount", ext['part'], ext_mount])
+		mountext.wait()
+		ext['dir'] = getmountpoint(ext['part'])
+	if not fat['dir'] or not ext['dir']:
+		die('Couldn\'t find mountpoints! (Detected FAT32=%s, EXT3=%s)' % (fat['dir'], ext['dir']), 1)
+	if verbose: log('Found mountpoints: FAT32=%s, EXT3=%s' % (fat['dir'], ext['dir']))
+
+	# Confirm matching fat/ext partition and get nickname of drive
+	cur = sql.cursor()
+	cur.execute('SELECT name FROM drives WHERE fatuuid=? AND extuuid=?', (fat['uuid'], ext['uuid']))
+	backup_name = cur.fetchone()
+	if not backup_name:
+		die('Couldn\'t find mountpoints! FAT32=%s, EXT3=%s' % (fat['dir'], ext['dir']), 1)
+	backup_name = backup_name[0]
+
+	log('Device "%s" detected' % backup_name)
+#	# Wait for fsck, if running...
+#	fscklist = []
+#	for proc in psutil.process_iter():
+#		if proc.name == 'fsck.ext3':
+#			fscklist.append(proc)
+#	while True:
+#		for proc in fscklist:
+#			if not pslist.pid_exists(proc.pid):
+#				fscklist.pop(proc)
+#		if len(fscklist) == 0:
+#			break
+#		time.sleep(1)
+
+	# Open log file on device
+	if not os.path.exists(os.path.join(ext['dir'], 'log')):
+		log('Creating log directory on device')
+		os.mkdir(os.path.join(ext['dir'], 'log'))
+	logfiles.append(open(os.path.join(ext['dir'], 'log/backup_history.txt'), 'a'))
+	log('Backup starting')
+
+	sql.execute('UPDATE log SET status=\'Transferring\', drive=? WHERE ROWID=?', (backup_name, sql_rowid))
+	sql.commit()
+
+#	# Update database log
+#	cur = sql.cursor()
+#	cur.execute('INSERT INTO log(start, drive, status) VALUES (?, ?, \'Starting\')', (datetime.now(), backup_name))
+#	sql.commit()
+#	sql_rowid = cur.lastrowid
+
+	log('FAT32 copy beginning')
+	# Copy the FAT32 filesystem; just a couple files, really
+	#TODO: check perms!
+	if fat_src[-1] != '/':
+		fat_src = fat_src + '/'
+	if not os.path.isdir(fat['dir']):
+		die('Error: Destination FAT32 directory %s not found' % fat['dir'], 1)
+	rsync = Popen(['/usr/bin/rsync', '-rt', fat_src, fat['dir']], stdout=PIPE, stderr=STDOUT)
+	for line in rsync.stdout:
+		log(line)
+	rsync.wait()
+	if not rsync.returncode == 0:
+		die('Error: Failure while copying FAT32 partition!', 1)
+	log('FAT32 copy finished')
+
+#	backup_list_dates = [(f, datetime.fromtimestamp(os.stat(os.path.join(ext['dir'], f)).st_mtime)) for f in os.listdir(ext['dir']) if os.path.isdir(os.path.join(ext['dir'], f)) and not f in ('log', 'lost+found')]
+#	print backup_list_dates
+
+	# Copy the EXT3 filesystem
+	log('EXT3 copy beginning')
+	
+	
+	# TODO: make a different folder name if run manually... somehow
+	dest = os.path.join(ext['dir'], datetime.today().strftime('%Y-%m-%d.%H.%M.%S'))
+	latest = os.path.join(ext['dir'], 'latest')
+	dest_star = os.path.join(dest, '*')
+	if os.path.exists(dest):
+		die('ERROR: Destination folder %s already exists! Exiting...' % dest, 1)
+	if os.path.exists(latest):
+		os.rename(latest, dest)
+	else:
+		log('Missing the "latest" directory - The last backup on this drive failed!')
+		os.mkdir(dest)
+	# Copying over the new data
+	log('EXT3 data copy beginning')
+	if ext_src[-1] != '/':
+		ext_src = ext_src + '/'
+	if not os.path.isdir(ext['dir']):
+		die('Error: Destination EXT3 directory %s not found' % ext['dir'])
+	rsync = Popen(['/usr/bin/rsync', '-a', '--delete', '--bwlimit=32768', ext_src, dest], stdout=PIPE, stderr=STDOUT)
+	for line in rsync.stdout:
+		log(line)
+	rsync.wait()
+	if not rsync.returncode == 0:
+		die('Error: Failure while copying EXT3 partition!', 1)
+	log('EXT3 data copy finished')
+	
+	# Preparing the next set of hardlinks in the "latest" folder
+	log('EXT3 link copy beginning')
+	if os.path.isdir(latest):
+		shutil.rmtree(latest)
+	os.mkdir(latest)
+	if latest[-1] != '/':
+		latest = latest + '/'
+#	os.system('/bin/cp -al %s %s' % (dest_star, latest))
+	cp = Popen('/bin/cp -al %s %s' % (dest_star, latest), stdout=PIPE, stderr=STDOUT, shell=True)
+	for line in cp.stdout:
+		log(line)
+	cp.wait()
+	if not cp.returncode == 0:
+		die('Error: Failure after transfer, while creating links in the EXT3 partition!', 1)
+	log('EXT3 link copy finished')
+	log('Backup complete!')
+
+	sql.execute('UPDATE log SET finish=?, status=\'Complete\' WHERE ROWID=?', (datetime.now(), sql_rowid))
+	sql.commit()
+
+	# Close all logfiles (unmount crashes otherwise)
+	for lf in logfiles:
+		lf.close()
+
+	# Unmount devices
+	umount = Popen(['/bin/umount', fat['part'], ext['part']], stdout=PIPE, stderr=STDOUT)
+	for line in umount.stdout:
+		log(line)
+	umount.wait()
+	if not umount.returncode == 0:
+		die('Error: Failure while unmounting partitions!', 1)
+	
+
+
+
+help = """backup2usb  version 0.7 (with automount/umount, nagios output)
+Copyright (C) 2010 by Brian Villemarette <brian@c4tech.com>
+
+Copies the latest local rsnapshot backup to a device.  Intended to be used by
+a cron job, and allow for rotating USB harddisks to have staggered versions of
+the most recent backup.
+
+Usage:
+backup2usb [OPTION]...
+
+Options:
+  -a "DEVICE:NAME" Add a device to the database of available backup mediums.
+                   DEVICE is the block device (e.g. /dev/sdb), NAME is your
+                   nickname for this device.  The device is expected to already
+                   be formatted with 2 existing partitions, a FAT32 and an EXT3,
+                   no checking is done to confirm the partitioning is correct!
+  -b               Perform backup!
+  -d NAME          Delete a device from the database
+  -h               Display this help message
+  -l               List the stored backup devices, along with labels and UUIDs
+  -n               Nagios-compatible output of most recent run
+  -q               Quiet; no display on stdout
+  -s               Setup cron job, and ensure copy in /usr/local/bin (Temporary)
+  -u               Update to latest version (not implemented)
+  -v               Verbose
+"""
+if not os.path.exists(sqlite_file):
+	log('WARNING: SQLite database missing, creating...')
+	sql = sqlite3.connect(sqlite_file, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+	sql.execute('CREATE TABLE drives(name UNIQUE, fatuuid, fatlabel, extuuid, extlabel)')
+	sql.execute('CREATE TABLE log(start TIMESTAMP, finish TIMESTAMP, drive, status)')
+else:
+	sql = sqlite3.connect(sqlite_file, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+sql.row_factory = sqlite3.Row
+
+opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsv')
+if opts == []:
+	print help
+	sys.exit(0)
+
+will_perform_backup = False
+for o, a in opts:
+	if o == '-a':
+		add_device(a)
+	elif o == '-b':
+		will_perform_backup = True
+	elif o == '-d':
+		remove_device(a)
+	elif o == '-h':
+		print help
+		sys.exit(0)
+	elif o == '-l':
+		list_devices()
+	elif o == '-n':
+		nagios_status()
+	elif o == '-s':
+		if not os.path.isfile('/etc/cron.d/backup2usb'):
+			crontext = "30 20	* * *		root	/usr/local/bin/backup2usb -qb\n"
+			f = open('/etc/cron.d/backup2usb', 'w')
+			f.write(crontext)
+			f.close()
+			print 'Cron job created (set to 8:30pm by default)...'
+		shutil.copy(os.path.abspath(__file__), '/usr/local/bin/')
+		print 'Executable copied to /usr/local/bin'
+	elif o == '-q':
+		logfiles.remove(sys.stdout)
+#	elif o == '-u':
+		# TODO: updates!!
+	elif o == '-v':
+		verbose = True
+if will_perform_backup: perform_backup()
+
