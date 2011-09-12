@@ -140,12 +140,11 @@ def remove_device(name):
 	sql.commit()
 
 def list_devices():
-	print 'BackupID             Type   Label      UUID'
-	print '-------------------- ------ ---------- ------------------------------------'
-	for row in sql.execute('SELECT * FROM drives'):
-		print '%-20s FAT32  %-10s %s' % (row['name'], row['fatlabel'], row['fatuuid'])
-		print '                     EXT3   %-10s %s' % (row['extlabel'], row['extuuid'])
-
+    print 'BackupID             Type   Label      UUID'
+    print '-------------------- ------ ---------- ------------------------------------'
+    for row in sql.execute('SELECT * FROM drives'):
+      print '%-20s FAT32  %-10s %s' % (row['name'], row['fatlabel'], row['fatuuid'])
+      print '                     EXT3   %-10s %s' % (row['extlabel'], row['extuuid'])
 def nagios_status():
 	pid_file = '/var/run/backup2usb.pid'
 	running = False
@@ -198,6 +197,15 @@ def nagios_status():
 
 	print >> sys.stdout, retstr
 	exit(retval)
+
+def list_backups(): #list backups on current drive. sql join with log 
+  print 'placeholder'
+
+def check_space(): #check space on usb and return true or false depending on percentage threshold
+  print 'placeholder'
+
+def delete_backup(): #delete the oldest backup
+  print 'placeholder'
 
 def perform_backup():
 	global fat_src, ext_src, verbose
