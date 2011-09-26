@@ -28,6 +28,8 @@ sqlite_file = os.path.join(b2u_dir, 'backup2usb.sqlite')
 fat_mount = os.path.join(b2u_dir, 'fatmount')
 ext_mount = os.path.join(b2u_dir, 'extmount')
 
+
+
 if not os.path.isdir(b2u_dir):
 	os.mkdir(b2u_dir)
 if not os.path.isdir(fat_mount):
@@ -55,6 +57,7 @@ def die(line, exitcode):
 # fresh, unless run as root
 def diskinfo():
 	retval = {}
+	Popen(['/sbin/blkid', '-g']).communicate(0)
 	blkid = Popen(['/sbin/blkid'], stdout=PIPE)
 	for line in blkid.stdout:
 		linedata = {}
@@ -140,11 +143,12 @@ def remove_device(name):
 	sql.commit()
 
 def list_devices():
-    print 'BackupID             Type   Label      UUID'
-    print '-------------------- ------ ---------- ------------------------------------'
-    for row in sql.execute('SELECT * FROM drives'):
-      print '%-20s FAT32  %-10s %s' % (row['name'], row['fatlabel'], row['fatuuid'])
-      print '                     EXT3   %-10s %s' % (row['extlabel'], row['extuuid'])
+	print 'BackupID             Type   Label      UUID'
+	print '-------------------- ------ ---------- ------------------------------------'
+	for row in sql.execute('SELECT * FROM drives'):
+		print '%-20s FAT32  %-10s %s' % (row['name'], row['fatlabel'], row['fatuuid'])
+		print '                     EXT3   %-10s %s' % (row['extlabel'], row['extuuid'])
+
 def nagios_status():
 	pid_file = '/var/run/backup2usb.pid'
 	running = False
@@ -192,20 +196,15 @@ def nagios_status():
 				retval = 2
 				retstr = 'CRITICAL: Backup is frozen (or checkdisking?)! Backup on drive %s started on %s' % (lastrun['drive'], lastrun['start'])
 		else:
-			retval = 2
-			retstr = 'CRITICAL: Backup crashed during transfer! Drive %s started on %s' % (lastrun['drive'], lastrun['start'])
+			if lastrun['drive'] == None:
+				retval = 2
+				retstr = 'CRITICAL: Backup drive not found for last run! Tried on %s' % lastrun['start']
+			else:
+				retval = 2
+				retstr = 'CRITICAL: Backup crashed during transfer! Drive %s started on %s' % (lastrun['drive'], lastrun['start'])
 
 	print >> sys.stdout, retstr
 	exit(retval)
-
-def list_backups(): #list backups on current drive. sql join with log 
-  print 'placeholder'
-
-def check_space(): #check space on usb and return true or false depending on percentage threshold
-  print 'placeholder'
-
-def delete_backup(): #delete the oldest backup
-  print 'placeholder'
 
 def perform_backup():
 	global fat_src, ext_src, verbose
@@ -216,7 +215,6 @@ def perform_backup():
 	sql.commit()
 	sql_rowid = cur.lastrowid
 
-	log('')
 	log('Running backup script...')
 	if not check_pid():
 		die('already running!', 1)
@@ -380,7 +378,7 @@ def perform_backup():
 
 
 
-help = """backup2usb  version 0.7 (with automount/umount, nagios output)
+help = """backup2usb  version 0.7b (quick fix for garbage collection)
 Copyright (C) 2010 by Brian Villemarette <brian@c4tech.com>
 
 Copies the latest local rsnapshot backup to a device.  Intended to be used by
@@ -415,40 +413,40 @@ else:
 	sql = sqlite3.connect(sqlite_file, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
 sql.row_factory = sqlite3.Row
 
-opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsv')
-if opts == []:
-	print help
-	sys.exit(0)
-
-will_perform_backup = False
-for o, a in opts:
-	if o == '-a':
-		add_device(a)
-	elif o == '-b':
-		will_perform_backup = True
-	elif o == '-d':
-		remove_device(a)
-	elif o == '-h':
+if __name__ == "__main__":
+	opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsv')
+	if opts == []:
 		print help
 		sys.exit(0)
-	elif o == '-l':
-		list_devices()
-	elif o == '-n':
-		nagios_status()
-	elif o == '-s':
-		if not os.path.isfile('/etc/cron.d/backup2usb'):
-			crontext = "30 20	* * *		root	/usr/local/bin/backup2usb -qb\n"
-			f = open('/etc/cron.d/backup2usb', 'w')
-			f.write(crontext)
-			f.close()
-			print 'Cron job created (set to 8:30pm by default)...'
-		shutil.copy(os.path.abspath(__file__), '/usr/local/bin/')
-		print 'Executable copied to /usr/local/bin'
-	elif o == '-q':
-		logfiles.remove(sys.stdout)
-#	elif o == '-u':
-		# TODO: updates!!
-	elif o == '-v':
-		verbose = True
-if will_perform_backup: perform_backup()
 
+	will_perform_backup = False
+	for o, a in opts:
+		if o == '-a':
+			add_device(a)
+		elif o == '-b':
+			will_perform_backup = True
+		elif o == '-d':
+			remove_device(a)
+		elif o == '-h':
+			print help
+			sys.exit(0)
+		elif o == '-l':
+			list_devices()
+		elif o == '-n':
+			nagios_status()
+		elif o == '-s':
+			if not os.path.isfile('/etc/cron.d/backup2usb'):
+				crontext = "30 20	* * *		root	/usr/local/bin/backup2usb -qb\n"
+				f = open('/etc/cron.d/backup2usb', 'w')
+				f.write(crontext)
+				f.close()
+				print 'Cron job created (set to 8:30pm by default)...'
+			shutil.copy(os.path.abspath(__file__), '/usr/local/bin/')
+			print 'Executable copied to /usr/local/bin'
+		elif o == '-q':
+			logfiles.remove(sys.stdout)
+	#	elif o == '-u':
+			# TODO: updates!!
+		elif o == '-v':
+			verbose = True
+	if will_perform_backup: perform_backup()
