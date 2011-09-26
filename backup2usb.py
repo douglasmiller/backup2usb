@@ -145,6 +145,7 @@ def list_devices():
     for row in sql.execute('SELECT * FROM drives'):
       print '%-20s FAT32  %-10s %s' % (row['name'], row['fatlabel'], row['fatuuid'])
       print '                     EXT3   %-10s %s' % (row['extlabel'], row['extuuid'])
+
 def nagios_status():
 	pid_file = '/var/run/backup2usb.pid'
 	running = False
@@ -199,10 +200,30 @@ def nagios_status():
 	exit(retval)
 
 def list_backups(): #list backups on current drive. sql join with log 
-  print 'placeholder'
+	print 'BackupID             Type   Label      UUID'
+	print '-------------------- ------ ---------- ------------------------------------'
+	for row in sql.execute('SELECT * FROM log'):
+		print row
 
-def check_space(): #check space on usb and return true or false depending on percentage threshold
-  print 'placeholder'
+def check_space(path): #check space on usb and return true or false depending on percentage threshold
+	disk = os.statvfs(path)
+	threshhold = 0.90
+
+	print disk
+	capacity = disk.f_bsize * disk.f_blocks
+	used = disk.f_bsize * (disk.f_blocks - disk.f_bavail)
+
+	per_used = float(used) / float(capacity)
+
+	print 'Path = ' + path
+	print	'Capacity = ' + str(capacity) 
+	print	'Used = ' + str(used) 
+	print	'Percent Used = ' + str(per_used)
+
+	if per_used > threshhold:
+		return False 
+	else:
+		return True 
 
 def delete_backup(): #delete the oldest backup
   print 'placeholder'
@@ -248,6 +269,10 @@ def perform_backup():
 	# Find mountpoints of partitions
 	fat['dir'] = getmountpoint(fat['part'])
 	ext['dir'] = getmountpoint(ext['part'])
+	print fat
+	print ext
+	print check_space(fat['dir'])
+	print check_space(ext['dir'])
 	if not fat['dir']:
 		mountfat = Popen(["mount", fat['part'], fat_mount])
 		mountfat.wait()
@@ -415,7 +440,7 @@ else:
 	sql = sqlite3.connect(sqlite_file, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
 sql.row_factory = sqlite3.Row
 
-opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsv')
+opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsvg')
 if opts == []:
 	print help
 	sys.exit(0)
@@ -433,6 +458,9 @@ for o, a in opts:
 		sys.exit(0)
 	elif o == '-l':
 		list_devices()
+	elif o == '-g':
+		#list_backups()
+		check_space()
 	elif o == '-n':
 		nagios_status()
 	elif o == '-s':
