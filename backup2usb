@@ -238,18 +238,24 @@ def check_space(bu_src, bu_dest): #check space on usb and return true or false d
 	if verbose: log('USB Used = ' + str(used))
 	if verbose: log('USB Percent Used(decimal form) = ' + str(per_used))
 
-	if backupSize > available:
-		die('Source Backup is larger than space available on USB', 1)
-		return True 
+	while backupSize > available:
+		log('Source Backup is larger than space available on USB')
+		delete_backup(bu_dest)
+		if verbose: log('PRE USB EXT Space Available = ' + str(available))
+		usb = os.statvfs(bu_dest)
+		available = usb.f_bavail * usb.f_bsize
+		if verbose: log('POST USB EXT Space Available = ' + str(available))
 
 	if per_used > threshhold:
-		die('EXT USB Partition is almost full', 1)
-		return True 
-	else:
-		return False
+		log('EXT USB Partition is almost full', 1)
+		delete_backup(bu_dest)
 
-def delete_backup(): #delete the oldest backup
-  print 'placeholder'
+def delete_backup(bu_dest): #delete the oldest backup
+	usb_bu_dir = os.listdir(bu_dest)
+	usb_bu_dir.sort()
+	oldest_bu = os.path.join(bu_dest, usb_bu_dir[0])
+	log('Deleting oldest backup located at: ' + usb_bu_dir[0])
+	shutil.rmtree(oldest_bu)
 
 def perform_backup():
 	global fat_src, ext_src, verbose
@@ -364,6 +370,8 @@ def perform_backup():
 	
 	
 	# TODO: make a different folder name if run manually... somehow
+	# Make sure USB isn't almost full or backup is larger than space available
+	check_space(ext_src, ext['dir'])
 	dest = os.path.join(ext['dir'], datetime.today().strftime('%Y-%m-%d.%H.%M.%S'))
 	latest = os.path.join(ext['dir'], 'latest')
 	dest_star = os.path.join(dest, '*')
@@ -374,8 +382,6 @@ def perform_backup():
 	else:
 		log('Missing the "latest" directory - The last backup on this drive failed!')
 		os.mkdir(dest)
-	if check_space(ext_src, ext['dir']):
-		die('Error: Not enough space left on USB drive', 1)
 	# Copying over the new data
 	log('EXT3 data copy beginning')
 	if ext_src[-1] != '/':
@@ -415,12 +421,14 @@ def perform_backup():
 		lf.close()
 
 	# Unmount devices
+	"""
 	umount = Popen(['/bin/umount', fat['part'], ext['part']], stdout=PIPE, stderr=STDOUT)
 	for line in umount.stdout:
 		log(line)
 	umount.wait()
 	if not umount.returncode == 0:
 		die('Error: Failure while unmounting partitions!', 1)
+	"""
 	
 
 
@@ -479,7 +487,6 @@ for o, a in opts:
 	elif o == '-l':
 		list_devices()
 	elif o == '-g':
-		#list_backups()
 		check_space()
 	elif o == '-n':
 		nagios_status()
