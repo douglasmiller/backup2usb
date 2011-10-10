@@ -27,6 +27,7 @@ fat_src = os.path.join(b2u_dir, 'fat32')
 sqlite_file = os.path.join(b2u_dir, 'backup2usb.sqlite')
 fat_mount = os.path.join(b2u_dir, 'fatmount')
 ext_mount = os.path.join(b2u_dir, 'extmount')
+no_of_backups = 4
 
 
 
@@ -221,6 +222,7 @@ def backup_size(bu_src): #returns the size of what is about to be backed up
 	return total_size
 
 def check_space(bu_src, bu_dest): #check space on usb and return true or false depending on percentage threshold
+	global backupSize, usb, available
 	backupSize = backup_size(bu_src)
 	usb = os.statvfs(bu_dest)
 	threshhold = 0.90
@@ -238,24 +240,27 @@ def check_space(bu_src, bu_dest): #check space on usb and return true or false d
 	if verbose: log('USB Used = ' + str(used))
 	if verbose: log('USB Percent Used(decimal form) = ' + str(per_used))
 
-	while backupSize > available:
+	if backupSize > available:
 		log('Source Backup is larger than space available on USB')
-		delete_backup(bu_dest)
-		if verbose: log('PRE USB EXT Space Available = ' + str(available))
-		usb = os.statvfs(bu_dest)
-		available = usb.f_bavail * usb.f_bsize
-		if verbose: log('POST USB EXT Space Available = ' + str(available))
+		return True
 
 	if per_used > threshhold:
-		log('EXT USB Partition is almost full', 1)
-		delete_backup(bu_dest)
+		log('EXT USB Partition is almost full')
+		return True 
+
+	return False
 
 def delete_backup(bu_dest): #delete the oldest backup
 	usb_bu_dir = os.listdir(bu_dest)
 	usb_bu_dir.sort()
 	oldest_bu = os.path.join(bu_dest, usb_bu_dir[0])
 	log('Deleting oldest backup located at: ' + usb_bu_dir[0])
-	shutil.rmtree(oldest_bu)
+	if oldest_bu != 'log':
+		shutil.rmtree(oldest_bu)
+	for backup in reversed(usb_bu_dir):
+		if len(backup) != 19:
+			log(backup)
+	log('number of backups: ' + str(enumerate(backup)))
 
 def perform_backup():
 	global fat_src, ext_src, verbose
@@ -371,7 +376,6 @@ def perform_backup():
 	
 	# TODO: make a different folder name if run manually... somehow
 	# Make sure USB isn't almost full or backup is larger than space available
-	check_space(ext_src, ext['dir'])
 	dest = os.path.join(ext['dir'], datetime.today().strftime('%Y-%m-%d.%H.%M.%S'))
 	latest = os.path.join(ext['dir'], 'latest')
 	dest_star = os.path.join(dest, '*')
@@ -383,6 +387,8 @@ def perform_backup():
 		log('Missing the "latest" directory - The last backup on this drive failed!')
 		os.mkdir(dest)
 	# Copying over the new data
+	while check_space(ext_src, ext['dir']): #check for available space
+		delete_backup(ext['dir'])	
 	log('EXT3 data copy beginning')
 	if ext_src[-1] != '/':
 		ext_src = ext_src + '/'
