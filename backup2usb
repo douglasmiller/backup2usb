@@ -474,7 +474,7 @@ else:
 	sql = sqlite3.connect(sqlite_file, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
 sql.row_factory = sqlite3.Row
 
-opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsvg')
+opts, args = getopt.getopt(sys.argv[1:], 'a:bd:hlnqsv')
 if opts == []:
 	print help
 	sys.exit(0)
@@ -492,8 +492,6 @@ for o, a in opts:
 		sys.exit(0)
 	elif o == '-l':
 		list_devices()
-	elif o == '-g':
-		delete_backup()
 	elif o == '-n':
 		nagios_status()
 	elif o == '-s':
